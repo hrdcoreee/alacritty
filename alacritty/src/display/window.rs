@@ -620,14 +620,13 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
 
             const WCA_ACCENT_POLICY: u32 = 19;
             const ACCENT_DISABLED: u32 = 0;
-            const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
-            // const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+            const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
             let mut policy = if blur {
                 AccentPolicy {
-                    accent_state: ACCENT_ENABLE_BLURBEHIND,
+                    accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
                     accent_flags: 0,
-                    gradient_color: 0,
+                    gradient_color: 0x01000000,
                     animation_id: 0,
                 }
             } else {
