@@ -621,13 +621,13 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
             const WCA_ACCENT_POLICY: u32 = 19;
             const ACCENT_DISABLED: u32 = 0;
             const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
-            const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+            // const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
             let mut policy = if blur {
                 AccentPolicy {
-                    accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
-                    accent_flags: 2,
-                    gradient_color: 0x011e1e2e,
+                    accent_state: ACCENT_ENABLE_BLURBEHIND,
+                    accent_flags: 0,
+                    gradient_color: 0,
                     animation_id: 0,
                 }
             } else {
@@ -645,17 +645,7 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
                 cb_data: mem::size_of::<AccentPolicy>(),
             };
 
-            let res = set_wca(hwnd, &mut data);
-            if res == 0 && blur {
-                let mut fallback_policy = AccentPolicy {
-                    accent_state: ACCENT_ENABLE_BLURBEHIND,
-                    accent_flags: 0,
-                    gradient_color: 0,
-                    animation_id: 0,
-                };
-                data.pv_data = &mut fallback_policy as *mut _ as *mut std::ffi::c_void;
-                let _ = set_wca(hwnd, &mut data);
-            }
+            let _ = set_wca(hwnd, &mut data);
             log::debug!("Applied Windows 10 SetWindowCompositionAttribute blur: {blur}");
         }
     }
