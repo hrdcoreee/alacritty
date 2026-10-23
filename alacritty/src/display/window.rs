@@ -196,6 +196,9 @@ impl Window {
         // Set initial transparency hint.
         window.set_transparent(config.window_opacity() < 1.);
 
+        #[cfg(windows)]
+        set_windows_blur(&window, config.window.blur);
+
         #[cfg(target_os = "macos")]
         use_srgb_color_space(&window);
 
@@ -374,6 +377,8 @@ impl Window {
 
     pub fn set_blur(&self, blur: bool) {
         self.window.set_blur(blur);
+        #[cfg(windows)]
+        set_windows_blur(&self.window, blur);
     }
 
     pub fn set_maximized(&self, maximized: bool) {
@@ -534,4 +539,124 @@ fn use_srgb_color_space(window: &WinitWindow) {
     };
 
     view.window().unwrap().setColorSpace(Some(&NSColorSpace::sRGBColorSpace()));
+}
+
+#[cfg(windows)]
+fn set_windows_blur(window: &WinitWindow, blur: bool) {
+    let hwnd = match window.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as windows_sys::Win32::Foundation::HWND,
+        _ => return,
+    };
+    apply_windows_blur(hwnd, blur);
+}
+
+#[cfg(windows)]
+fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
+    use std::mem;
+    use windows_sys::s;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
+
+    // 1. Try Windows 11 Build 22621+ DWMWA_SYSTEMBACKDROP_TYPE (Acrylic / None)
+    unsafe {
+        let dwm = LoadLibraryA(s!("dwmapi.dll"));
+        if !dwm.is_null() {
+            type DwmSetWindowAttributeFn = unsafe extern "system" fn(
+                windows_sys::Win32::Foundation::HWND,
+                u32,
+                *const std::ffi::c_void,
+                u32,
+            ) -> windows_sys::core::HRESULT;
+
+            let dwm_set_attr = GetProcAddress(dwm, s!("DwmSetWindowAttribute"));
+            if let Some(dwm_set_attr) = dwm_set_attr {
+                let dwm_set_attr: DwmSetWindowAttributeFn = mem::transmute(dwm_set_attr);
+                const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+                // 3 = DWMSBT_TRANSIENTWINDOW (Acrylic), 1 = DWMSBT_NONE
+                let backdrop: u32 = if blur { 3 } else { 1 };
+                let hr = dwm_set_attr(
+                    hwnd,
+                    DWMWA_SYSTEMBACKDROP_TYPE,
+                    &backdrop as *const _ as *const std::ffi::c_void,
+                    mem::size_of::<u32>() as u32,
+                );
+                if hr == 0 {
+                    log::debug!("Successfully applied Windows 11 DWM backdrop blur");
+                    return;
+                }
+            }
+        }
+    }
+
+    // 2. Fallback for Windows 10 and older Windows 11: SetWindowCompositionAttribute
+    unsafe {
+        let user32 = GetModuleHandleA(s!("user32.dll"));
+        if user32.is_null() {
+            return;
+        }
+
+        #[repr(C)]
+        struct AccentPolicy {
+            accent_state: u32,
+            accent_flags: u32,
+            gradient_color: u32,
+            animation_id: u32,
+        }
+
+        #[repr(C)]
+        struct WindowCompositionAttribData {
+            attrib: u32,
+            pv_data: *mut std::ffi::c_void,
+            cb_data: usize,
+        }
+
+        type SetWindowCompositionAttributeFn = unsafe extern "system" fn(
+            windows_sys::Win32::Foundation::HWND,
+            *mut WindowCompositionAttribData,
+        ) -> windows_sys::Win32::Foundation::BOOL;
+
+        let set_wca = GetProcAddress(user32, s!("SetWindowCompositionAttribute"));
+        if let Some(set_wca) = set_wca {
+            let set_wca: SetWindowCompositionAttributeFn = mem::transmute(set_wca);
+
+            const WCA_ACCENT_POLICY: u32 = 19;
+            const ACCENT_DISABLED: u32 = 0;
+            const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
+            const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+
+            let mut policy = if blur {
+                AccentPolicy {
+                    accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                    accent_flags: 2,
+                    gradient_color: 0x011e1e2e,
+                    animation_id: 0,
+                }
+            } else {
+                AccentPolicy {
+                    accent_state: ACCENT_DISABLED,
+                    accent_flags: 0,
+                    gradient_color: 0,
+                    animation_id: 0,
+                }
+            };
+
+            let mut data = WindowCompositionAttribData {
+                attrib: WCA_ACCENT_POLICY,
+                pv_data: &mut policy as *mut _ as *mut std::ffi::c_void,
+                cb_data: mem::size_of::<AccentPolicy>(),
+            };
+
+            let res = set_wca(hwnd, &mut data);
+            if res == 0 && blur {
+                let mut fallback_policy = AccentPolicy {
+                    accent_state: ACCENT_ENABLE_BLURBEHIND,
+                    accent_flags: 0,
+                    gradient_color: 0,
+                    animation_id: 0,
+                };
+                data.pv_data = &mut fallback_policy as *mut _ as *mut std::ffi::c_void;
+                let _ = set_wca(hwnd, &mut data);
+            }
+            log::debug!("Applied Windows 10 SetWindowCompositionAttribute blur: {blur}");
+        }
+    }
 }
