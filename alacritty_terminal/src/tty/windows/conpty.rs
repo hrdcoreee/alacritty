@@ -24,9 +24,9 @@ use crate::event::{OnResize, WindowSize};
 use crate::tty::Options;
 use crate::tty::windows::blocking::{UnblockedReader, UnblockedWriter};
 use crate::tty::windows::child::ChildExitWatcher;
-use crate::tty::windows::{Pty, cmdline, win32_string};
-
-const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
+use crate::tty::windows::{
+    Backend, PIPE_CAPACITY, Pty, ReadSource, WriteSink, cmdline, win32_string,
+};
 
 /// Load the pseudoconsole API from conpty.dll if possible, otherwise use the
 /// standard Windows API.
@@ -234,13 +234,13 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         }
     }
 
-    let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
-    let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
+    let conin = UnblockedWriter::new(WriteSink::Anon(conin), PIPE_CAPACITY);
+    let conout = UnblockedReader::new(ReadSource::Anon(conout), PIPE_CAPACITY);
 
     let child_watcher = ChildExitWatcher::new(proc_info.hProcess)?;
     let conpty = Conpty { handle: pty_handle as HPCON, api };
 
-    Ok(Pty::new(conpty, conout, conin, child_watcher))
+    Ok(Pty::new(Backend::Conpty(conpty), conout, conin, child_watcher, None))
 }
 
 // Windows environment variables are case-insensitive, and the caller is responsible for

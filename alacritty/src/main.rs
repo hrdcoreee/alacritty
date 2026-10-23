@@ -31,6 +31,8 @@ mod cli;
 mod clipboard;
 mod config;
 mod daemon;
+#[cfg(windows)]
+mod defterm;
 mod display;
 mod event;
 mod input;
@@ -197,6 +199,9 @@ fn alacritty(mut options: Options) -> Result<(), Box<dyn Error>> {
     };
 
     // Setup automatic RAII cleanup for our files.
+    #[cfg(windows)]
+    let log_cleanup = log_file.filter(|_| !config.debug.persistent_logging && !options.embedding);
+    #[cfg(not(windows))]
     let log_cleanup = log_file.filter(|_| !config.debug.persistent_logging);
     let _files = TemporaryFiles {
         #[cfg(unix)]
@@ -205,7 +210,21 @@ fn alacritty(mut options: Options) -> Result<(), Box<dyn Error>> {
     };
 
     // Event processor.
+    #[cfg(windows)]
+    let embedding = options.embedding;
     let mut processor = Processor::new(config, options, &window_event_loop);
+
+    // Register the COM class object used by the Windows default terminal handoff. The registration
+    // must stay alive for as long as the event loop is running.
+    #[cfg(windows)]
+    let _com_server = if embedding {
+        let proxy = window_event_loop.create_proxy();
+        let server = defterm::ComServer::register(proxy.clone())?;
+        defterm::spawn_embedding_timeout(proxy);
+        Some(server)
+    } else {
+        None
+    };
 
     // Start event loop and block until shutdown.
     let result = processor.run(window_event_loop);

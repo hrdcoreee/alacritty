@@ -172,10 +172,19 @@ impl WindowContext {
         options: WindowOptions,
         proxy: EventLoopProxy<Event>,
     ) -> Result<Self, Box<dyn Error>> {
+        #[cfg(windows)]
+        let mut display = display;
+
         let mut pty_config = config.pty_config();
         options.terminal_options.override_pty_config(&mut pty_config);
 
         let preserve_title = options.window_identity.title.is_some();
+
+        // Use the title provided by the console host for handed off terminals.
+        #[cfg(windows)]
+        if let Some(title) = options.handoff.as_ref().and_then(|handoff| handoff.title()) {
+            display.window.set_title(title.to_owned());
+        }
 
         info!(
             "PTY dimensions: {:?} x {:?}",
@@ -198,6 +207,15 @@ impl WindowContext {
         // The PTY forks a process to run the shell on the slave side of the
         // pseudoterminal. A file descriptor for the master side is retained for
         // reading/writing to the shell.
+        #[cfg(windows)]
+        let pty = match options.handoff.as_ref() {
+            Some(handoff) => {
+                info!("Setting up handed off pseudoconsole");
+                tty::new_handoff(&pty_config, display.size_info.into(), handoff)?
+            },
+            None => tty::new(&pty_config, display.size_info.into(), display.window.id().into())?,
+        };
+        #[cfg(not(windows))]
         let pty = tty::new(&pty_config, display.size_info.into(), display.window.id().into())?;
 
         #[cfg(not(windows))]

@@ -41,6 +41,7 @@ extern "system" fn child_exit_callback(ctx: *mut c_void, timed_out: BOOLEAN) {
     let child_handle = event_tx.child_handle.load(Ordering::Relaxed) as HANDLE;
     let status = unsafe { GetExitCodeProcess(child_handle, &mut exit_code) };
     let exit_status = if status == FALSE { None } else { Some(ExitStatus::from_raw(exit_code)) };
+    log::debug!("Child process (handle {:?}) exited with status: {:?}", child_handle, exit_status);
     event_tx.sender.send(ChildEvent::Exited(exit_status)).ok();
 
     let interest = event_tx.interest.lock().unwrap();

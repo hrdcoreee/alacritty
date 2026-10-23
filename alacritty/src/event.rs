@@ -42,6 +42,8 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::{self, ClipboardType, Term, TermMode};
+#[cfg(windows)]
+use alacritty_terminal::tty::Handoff;
 use alacritty_terminal::vte::ansi::NamedColor;
 
 #[cfg(unix)]
@@ -231,7 +233,7 @@ impl ApplicationHandler<Event> for Processor {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        if cause != StartCause::Init || self.cli_options.daemon {
+        if cause != StartCause::Init || self.cli_options.daemon || self.cli_options.embedding {
             return;
         }
 
@@ -387,6 +389,44 @@ impl ApplicationHandler<Event> for Processor {
                     }
                 } else if let Err(err) = self.create_window(event_loop, options) {
                     error!("Could not open window: {err:?}");
+                }
+            },
+            // Create a window for a terminal handed off by the Windows console host.
+            #[cfg(windows)]
+            (EventType::TerminalHandoff(handoff), _) => {
+                info!("Creating window for Windows terminal handoff");
+                // XXX Ensure that no context is current when creating a new window,
+                // otherwise it may lock the backing buffer of the
+                // surface of current context when asking
+                // e.g. EGL on Wayland to create a new context.
+                for window_context in self.windows.values_mut() {
+                    window_context.display.make_not_current();
+                }
+
+                let mut options = WindowOptions::default();
+                options.handoff = Some(handoff);
+
+                let result = if self.gl_config.is_none() {
+                    self.create_initial_window(event_loop, options)
+                } else {
+                    self.create_window(event_loop, options)
+                };
+
+                if let Err(err) = result {
+                    error!("Could not create terminal handoff window: {err:?}");
+
+                    // Avoid lingering around without any window.
+                    if self.windows.is_empty() {
+                        event_loop.exit();
+                    }
+                }
+            },
+            // Exit if COM started us but never handed off a terminal.
+            #[cfg(windows)]
+            (EventType::EmbeddingTimeout, _) => {
+                if self.windows.is_empty() {
+                    info!("Terminal handoff timed out");
+                    event_loop.exit();
                 }
             },
             // Shutdown all windows.
@@ -546,12 +586,16 @@ pub enum EventType {
     Message(Message),
     Scroll(Scroll),
     CreateWindow(WindowOptions),
+    #[cfg(windows)]
+    TerminalHandoff(Handoff),
     #[cfg(unix)]
     IpcConfig(IpcConfig),
     #[cfg(unix)]
     IpcGetConfig(Arc<UnixStream>),
     BlinkCursor,
     BlinkCursorTimeout,
+    #[cfg(windows)]
+    EmbeddingTimeout,
     SearchNext,
     #[cfg(unix)]
     Shutdown,
@@ -1930,6 +1974,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 },
                 #[cfg(unix)]
                 EventType::IpcConfig(_) | EventType::IpcGetConfig(..) | EventType::Shutdown => (),
+                #[cfg(windows)]
+                EventType::TerminalHandoff(_) | EventType::EmbeddingTimeout => (),
                 EventType::Message(_)
                 | EventType::ConfigReload(_)
                 | EventType::CreateWindow(_)

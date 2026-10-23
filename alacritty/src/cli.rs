@@ -1,5 +1,7 @@
 use std::cmp::max;
 use std::collections::HashMap;
+use std::env;
+use std::ffi::OsString;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -66,6 +68,13 @@ pub struct Options {
     #[clap(long)]
     pub daemon: bool,
 
+    /// Whether Alacritty was started by COM to serve a terminal handoff.
+    ///
+    /// This is set automatically when the process is launched with `-Embedding` and is not exposed
+    /// on the command line.
+    #[clap(skip)]
+    pub embedding: bool,
+
     /// CLI options for config overrides.
     #[clap(skip)]
     pub config_options: ParsedOptions,
@@ -81,7 +90,22 @@ pub struct Options {
 
 impl Options {
     pub fn new() -> Self {
-        let mut options = Self::parse();
+        // COM appends `-Embedding` when it starts an out-of-process class server. Clap does not
+        // know about this flag, so strip it before parsing.
+        let mut embedding = false;
+        let mut args: Vec<OsString> = env::args_os().collect();
+        args.retain(|arg| {
+            let is_embedding = arg.to_str().is_some_and(|arg| {
+                arg.eq_ignore_ascii_case("-Embedding") || arg.eq_ignore_ascii_case("/Embedding")
+            });
+
+            embedding |= is_embedding;
+
+            !is_embedding
+        });
+
+        let mut options = Self::parse_from(args);
+        options.embedding = embedding;
 
         // Parse CLI config overrides.
         options.config_options = options.window_options.config_overrides();
@@ -114,6 +138,9 @@ impl Options {
         match (self.quiet, self.verbose) {
             // Force at least `Info` level for `--print-events`.
             (_, 0) if self.print_events => LevelFilter::Info,
+
+            // Default.
+            (0, 0) if self.embedding => LevelFilter::Info,
 
             // Default.
             (0, 0) => LevelFilter::Warn,
@@ -309,6 +336,12 @@ pub struct WindowOptions {
     #[cfg(not(any(target_os = "macos", windows)))]
     /// `ActivationToken` that we pass to winit.
     pub activation_token: Option<String>,
+
+    /// Handles for a PTY received through the Windows default terminal handoff.
+    #[clap(skip)]
+    #[serde(skip)]
+    #[cfg(windows)]
+    pub handoff: Option<alacritty_terminal::tty::Handoff>,
 
     /// Override configuration file options [example: 'cursor.style="Beam"'].
     #[clap(short = 'o', long, num_args = 1..)]
