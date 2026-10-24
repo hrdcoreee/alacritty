@@ -556,10 +556,36 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
     use windows_sys::s;
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
 
-    // 1. Try Windows 11 Build 22621+ DWMWA_SYSTEMBACKDROP_TYPE (Acrylic / None)
+    // 1. Configure DWM window frame & title bar (prevents transparent/glitched titlebar on Windows 10)
     unsafe {
         let dwm = LoadLibraryA(s!("dwmapi.dll"));
         if !dwm.is_null() {
+            #[repr(C)]
+            struct DwmBlurBehind {
+                dw_flags: u32,
+                f_enable: i32,
+                h_rgn_blur: *mut std::ffi::c_void,
+                f_transition_on_maximized: i32,
+            }
+
+            #[repr(C)]
+            struct Margins {
+                cx_left_width: i32,
+                cx_right_width: i32,
+                cy_top_height: i32,
+                cy_bottom_height: i32,
+            }
+
+            type DwmEnableBlurBehindWindowFn = unsafe extern "system" fn(
+                windows_sys::Win32::Foundation::HWND,
+                *const DwmBlurBehind,
+            ) -> windows_sys::core::HRESULT;
+
+            type DwmExtendFrameIntoClientAreaFn = unsafe extern "system" fn(
+                windows_sys::Win32::Foundation::HWND,
+                *const Margins,
+            ) -> windows_sys::core::HRESULT;
+
             type DwmSetWindowAttributeFn = unsafe extern "system" fn(
                 windows_sys::Win32::Foundation::HWND,
                 u32,
@@ -567,27 +593,50 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
                 u32,
             ) -> windows_sys::core::HRESULT;
 
-            let dwm_set_attr = GetProcAddress(dwm, s!("DwmSetWindowAttribute"));
-            if let Some(dwm_set_attr) = dwm_set_attr {
-                let dwm_set_attr: DwmSetWindowAttributeFn = mem::transmute(dwm_set_attr);
-                const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-                // 3 = DWMSBT_TRANSIENTWINDOW (Acrylic), 1 = DWMSBT_NONE
-                let backdrop: u32 = if blur { 3 } else { 1 };
-                let hr = dwm_set_attr(
-                    hwnd,
-                    DWMWA_SYSTEMBACKDROP_TYPE,
-                    &backdrop as *const _ as *const std::ffi::c_void,
-                    mem::size_of::<u32>() as u32,
-                );
-                if hr == 0 {
-                    log::debug!("Successfully applied Windows 11 DWM backdrop blur");
-                    return;
-                }
+            // Disable ancient Vista blurbehind that winit sets across the entire window frame.
+            if let Some(enable_bb) = GetProcAddress(dwm, s!("DwmEnableBlurBehindWindow")) {
+                let enable_bb: DwmEnableBlurBehindWindowFn = mem::transmute(enable_bb);
+                let bb = DwmBlurBehind {
+                    dw_flags: 1, // DWM_BB_ENABLE
+                    f_enable: 0, // false: do not blur non-client title bar/frame
+                    h_rgn_blur: std::ptr::null_mut(),
+                    f_transition_on_maximized: 0,
+                };
+                let _ = enable_bb(hwnd, &bb);
+            }
+
+            // Ensure non-client titlebar frame is kept outside client area
+            if let Some(extend_frame) = GetProcAddress(dwm, s!("DwmExtendFrameIntoClientArea")) {
+                let extend_frame: DwmExtendFrameIntoClientAreaFn = mem::transmute(extend_frame);
+                let margins = Margins {
+                    cx_left_width: 0,
+                    cx_right_width: 0,
+                    cy_top_height: 0,
+                    cy_bottom_height: 0,
+                };
+                let _ = extend_frame(hwnd, &margins);
+            }
+
+            if let Some(set_attr) = GetProcAddress(dwm, s!("DwmSetWindowAttribute")) {
+                let set_attr: DwmSetWindowAttributeFn = mem::transmute(set_attr);
+
+                // Enable standard solid non-client rendering policy
+                const DWMWA_NCRENDERING_POLICY: u32 = 2;
+                const DWMNCRP_ENABLED: u32 = 2;
+                let _ = set_attr(hwnd, DWMWA_NCRENDERING_POLICY, &DWMNCRP_ENABLED as *const _ as _, 4);
+
+                // Enable dark mode for native titlebar (Win10 20H1+ and Win11: 20, Win10 1809-1909: 19)
+                const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+                const DWMWA_USE_IMMERSIVE_DARK_MODE_OLD: u32 = 19;
+                let dark: u32 = 1;
+                let _ = set_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as _, 4);
+                let _ = set_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &dark as *const _ as _, 4);
             }
         }
     }
 
-    // 2. Fallback for Windows 10 and older Windows 11: SetWindowCompositionAttribute
+    // 2. TranslucentTB-style Acrylic implementation for both Windows 10 and Windows 11.
+    // Avoids DWMWA_SYSTEMBACKDROP_TYPE which forces Windows 11 DWM into an inactive gray fallback.
     unsafe {
         let user32 = GetModuleHandleA(s!("user32.dll"));
         if user32.is_null() {
@@ -625,8 +674,8 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
             let mut policy = if blur {
                 AccentPolicy {
                     accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
-                    accent_flags: 0,
-                    gradient_color: 0x01000000,
+                    accent_flags: 0, // TranslucentTB standard: 0 for acrylic
+                    gradient_color: 0x01000000, // Alpha 1 (required by DWM), neutral RGB
                     animation_id: 0,
                 }
             } else {
@@ -645,7 +694,7 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
             };
 
             let _ = set_wca(hwnd, &mut data);
-            log::debug!("Applied Windows 10 SetWindowCompositionAttribute blur: {blur}");
+            log::debug!("Applied TranslucentTB SetWindowCompositionAttribute blur: {blur}");
         }
     }
 }
