@@ -40,6 +40,7 @@ use winit::window::{
 };
 
 use alacritty_terminal::index::Point;
+use crate::display::color::Rgb;
 
 use crate::cli::WindowOptions;
 use crate::config::UiConfig;
@@ -197,7 +198,12 @@ impl Window {
         window.set_transparent(config.window_opacity() < 1.);
 
         #[cfg(windows)]
-        set_windows_blur(&window, config.window.blur);
+        set_windows_blur(
+            &window,
+            config.window.blur,
+            config.window_opacity(),
+            config.colors.primary.background,
+        );
 
         #[cfg(target_os = "macos")]
         use_srgb_color_space(&window);
@@ -375,10 +381,15 @@ impl Window {
         self.window.set_transparent(transparent);
     }
 
+    #[cfg(windows)]
+    pub fn set_blur(&self, blur: bool, opacity: f32, bg_color: Rgb) {
+        self.window.set_blur(blur);
+        set_windows_blur(&self.window, blur, opacity, bg_color);
+    }
+
+    #[cfg(not(windows))]
     pub fn set_blur(&self, blur: bool) {
         self.window.set_blur(blur);
-        #[cfg(windows)]
-        set_windows_blur(&self.window, blur);
     }
 
     pub fn set_maximized(&self, maximized: bool) {
@@ -542,16 +553,16 @@ fn use_srgb_color_space(window: &WinitWindow) {
 }
 
 #[cfg(windows)]
-fn set_windows_blur(window: &WinitWindow, blur: bool) {
+fn set_windows_blur(window: &WinitWindow, blur: bool, opacity: f32, bg_color: Rgb) {
     let hwnd = match window.window_handle().map(|h| h.as_raw()) {
         Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as windows_sys::Win32::Foundation::HWND,
         _ => return,
     };
-    apply_windows_blur(hwnd, blur);
+    apply_windows_blur(hwnd, blur, opacity, bg_color);
 }
 
 #[cfg(windows)]
-fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
+fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool, opacity: f32, bg_color: Rgb) {
     use std::mem;
     use windows_sys::s;
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
@@ -672,10 +683,17 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
             const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
             let mut policy = if blur {
+                let tint_alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+                let tint_alpha = tint_alpha.clamp(1, 255);
+                let gradient_color = (tint_alpha << 24)
+                    | ((bg_color.b as u32) << 16)
+                    | ((bg_color.g as u32) << 8)
+                    | (bg_color.r as u32);
+
                 AccentPolicy {
                     accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
-                    accent_flags: 0, // TranslucentTB standard: 0 for acrylic
-                    gradient_color: 0x01000000, // Alpha 1 (required by DWM), neutral RGB
+                    accent_flags: 2,
+                    gradient_color,
                     animation_id: 0,
                 }
             } else {
@@ -694,7 +712,11 @@ fn apply_windows_blur(hwnd: windows_sys::Win32::Foundation::HWND, blur: bool) {
             };
 
             let _ = set_wca(hwnd, &mut data);
-            log::debug!("Applied TranslucentTB SetWindowCompositionAttribute blur: {blur}");
+            log::debug!(
+                "Applied TranslucentTB SetWindowCompositionAttribute blur: {blur}, flags: {}, color: 0x{:08X}",
+                policy.accent_flags,
+                policy.gradient_color
+            );
         }
     }
 }

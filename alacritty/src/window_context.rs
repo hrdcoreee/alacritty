@@ -338,6 +338,13 @@ impl WindowContext {
 
         // Change opacity and blur state.
         self.display.window.set_transparent(!opaque);
+        #[cfg(windows)]
+        self.display.window.set_blur(
+            self.config.window.blur,
+            self.config.window_opacity(),
+            self.config.colors.primary.background,
+        );
+        #[cfg(not(windows))]
         self.display.window.set_blur(self.config.window.blur);
 
         // Update hint keys.
